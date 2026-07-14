@@ -5,6 +5,7 @@ using System.Diagnostics;
 using Microsoft.DurableTask.Worker.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using P = Microsoft.DurableTask.Protobuf;
 
 namespace Microsoft.DurableTask.Worker.Grpc;
 
@@ -61,6 +62,7 @@ sealed partial class GrpcDurableTaskWorker : DurableTaskWorker
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         AsyncDisposable workerOwnedChannelDisposable = this.GetCallInvoker(out CallInvoker callInvoker, out string address);
+        GrpcWorkerConnectionManager? connectionManager = null;
 
         // Seed the tracker from the configured channel once, then update latestObservedChannel after
         // each successful recreate. Do not re-read this.grpcOptions.Channel inside the loop: the options
@@ -69,11 +71,22 @@ sealed partial class GrpcDurableTaskWorker : DurableTaskWorker
         GrpcChannel? latestObservedChannel = this.grpcOptions.Channel;
         try
         {
+            connectionManager = this.CreateConnectionManager();
+            connectionManager?.Start(stoppingToken);
+            Action<P.HealthPing>? healthPingHandler = connectionManager is null
+                ? null
+                : connectionManager.ReportPrimaryHealthPing;
+
             this.logger.StartingTaskHubWorker(address);
 
             while (!stoppingToken.IsCancellationRequested)
             {
-                Processor processor = new(this, new(callInvoker), this.orchestrationFilter, this.ExceptionPropertiesProvider);
+                Processor processor = new(
+                    this,
+                    new(callInvoker),
+                    this.orchestrationFilter,
+                    this.ExceptionPropertiesProvider,
+                    healthPingHandler);
                 ProcessorExitReason reason = await processor.ExecuteAsync(stoppingToken);
 
                 if (reason == ProcessorExitReason.Shutdown || stoppingToken.IsCancellationRequested)
@@ -82,6 +95,7 @@ sealed partial class GrpcDurableTaskWorker : DurableTaskWorker
                 }
 
                 // ChannelRecreateRequested: try to obtain a fresh channel before re-entering the loop.
+                connectionManager?.ReportPrimaryDisconnected();
                 ChannelRecreateResult result = await this.TryRecreateChannelAsync(stoppingToken, workerOwnedChannelDisposable, latestObservedChannel);
                 if (result.Recreated)
                 {
@@ -100,8 +114,41 @@ sealed partial class GrpcDurableTaskWorker : DurableTaskWorker
         }
         finally
         {
-            await workerOwnedChannelDisposable.DisposeAsync();
+            try
+            {
+                if (connectionManager is not null)
+                {
+                    await connectionManager.DisposeAsync();
+                }
+            }
+            finally
+            {
+                await workerOwnedChannelDisposable.DisposeAsync();
+            }
         }
+    }
+
+    GrpcWorkerConnectionManager? CreateConnectionManager()
+    {
+        GrpcDurableTaskWorkerOptions.InternalOptions options = this.grpcOptions.Internal;
+        Func<GrpcChannel>? channelFactory = options.AdditionalChannelFactory;
+        if (channelFactory is null || string.IsNullOrWhiteSpace(options.TaskHubName))
+        {
+            return null;
+        }
+
+        return new GrpcWorkerConnectionManager(
+            options.TaskHubName,
+            () =>
+            {
+                GrpcChannel channel = channelFactory()
+                    ?? throw new InvalidOperationException("The additional gRPC channel factory returned null.");
+                return new AdditionalGrpcWorkerConnection(this, channel);
+            },
+            this.logger,
+            options.FanOutConnectionTimeout,
+            options.FanOutRetryDelay,
+            DeferredDisposeGracePeriod);
     }
 
     async Task<ChannelRecreateResult> TryRecreateChannelAsync(
@@ -327,5 +374,36 @@ sealed partial class GrpcDurableTaskWorker : DurableTaskWorker
         }
 
         return primaryLogger;
+    }
+
+    sealed class AdditionalGrpcWorkerConnection : IGrpcWorkerConnection
+    {
+        readonly GrpcDurableTaskWorker worker;
+        readonly GrpcChannel channel;
+
+        public AdditionalGrpcWorkerConnection(GrpcDurableTaskWorker worker, GrpcChannel channel)
+        {
+            this.worker = worker;
+            this.channel = channel;
+        }
+
+        public async Task RunAsync(
+            Action<P.HealthPing> onHealthPing,
+            CancellationToken connectionCancellation,
+            CancellationToken workerCancellation)
+        {
+            Processor processor = new(
+                this.worker,
+                new(this.channel.CreateCallInvoker()),
+                this.worker.orchestrationFilter,
+                this.worker.ExceptionPropertiesProvider,
+                onHealthPing);
+            await processor.ExecuteConnectionAsync(connectionCancellation, workerCancellation);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await ShutdownAndDisposeChannelAsync(this.channel);
+        }
     }
 }

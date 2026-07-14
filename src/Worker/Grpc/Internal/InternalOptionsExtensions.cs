@@ -115,4 +115,32 @@ public static class InternalOptionsExtensions
     {
         options.Internal.SilentDisconnectTimeout = timeout;
     }
+
+    /// <summary>
+    /// Configures the worker to open additional connections for scheduler hosts advertised for a task hub.
+    /// </summary>
+    /// <param name="options">The gRPC worker options.</param>
+    /// <param name="taskHubName">The task hub name used to select advertised scheduler hosts.</param>
+    /// <param name="channelFactory">
+    /// Factory that creates a fresh, independently owned channel for each connection attempt.
+    /// </param>
+    /// <remarks>
+    /// This is an internal API that supports the DurableTask infrastructure and not subject to
+    /// the same compatibility standards as public APIs. It may be changed or removed without notice in
+    /// any release.
+    /// </remarks>
+    public static void ConfigureConnectionFanOut(
+        this GrpcDurableTaskWorkerOptions options,
+        string taskHubName,
+        Func<GrpcChannel> channelFactory)
+    {
+        if (string.IsNullOrWhiteSpace(taskHubName))
+        {
+            throw new ArgumentException("Task hub name must not be empty.", nameof(taskHubName));
+        }
+
+        options.Internal.TaskHubName = taskHubName;
+        options.Internal.AdditionalChannelFactory =
+            channelFactory ?? throw new ArgumentNullException(nameof(channelFactory));
+    }
 }

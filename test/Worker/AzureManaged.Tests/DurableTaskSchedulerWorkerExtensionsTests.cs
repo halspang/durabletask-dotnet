@@ -226,6 +226,35 @@ public class DurableTaskSchedulerWorkerExtensionsTests
     }
 
     [Fact]
+    public async Task UseDurableTaskScheduler_ConnectionFanOutCreatesFreshChannels()
+    {
+        // Arrange
+        ServiceCollection services = new();
+        Mock<IDurableTaskWorkerBuilder> mockBuilder = new();
+        mockBuilder.Setup(builder => builder.Services).Returns(services);
+        mockBuilder.Object.UseDurableTaskScheduler(
+            ValidEndpoint,
+            ValidTaskHub,
+            new DefaultAzureCredential());
+        await using ServiceProvider provider = services.BuildServiceProvider();
+        GrpcDurableTaskWorkerOptions options = provider
+            .GetRequiredService<IOptionsFactory<GrpcDurableTaskWorkerOptions>>()
+            .Create(Options.DefaultName);
+
+        // Act
+        Func<GrpcChannel>? channelFactory = GetInternalOption<Func<GrpcChannel>>(options, "AdditionalChannelFactory");
+        channelFactory.Should().NotBeNull();
+        using GrpcChannel firstChannel = channelFactory!();
+        using GrpcChannel secondChannel = channelFactory();
+
+        // Assert
+        GetInternalOption<string>(options, "TaskHubName").Should().Be(ValidTaskHub);
+        firstChannel.Should().NotBeSameAs(options.Channel);
+        secondChannel.Should().NotBeSameAs(options.Channel);
+        secondChannel.Should().NotBeSameAs(firstChannel);
+    }
+
+    [Fact]
     public async Task UseDurableTaskScheduler_DifferentNamedOptions_UsesSeparateChannels()
     {
         // Arrange
@@ -265,7 +294,7 @@ public class DurableTaskSchedulerWorkerExtensionsTests
 
         // Act
         mockBuilder.Object.UseDurableTaskScheduler(ValidEndpoint, ValidTaskHub, credential);
-        
+
         GrpcChannel channel;
         await using (ServiceProvider provider = services.BuildServiceProvider())
         {
@@ -335,7 +364,7 @@ public class DurableTaskSchedulerWorkerExtensionsTests
 
         // Act
         mockBuilder.Object.UseDurableTaskScheduler(ValidEndpoint, ValidTaskHub, credential);
-        
+
         IOptionsMonitor<GrpcDurableTaskWorkerOptions> optionsMonitor;
         await using (ServiceProvider provider = services.BuildServiceProvider())
         {
@@ -362,11 +391,11 @@ public class DurableTaskSchedulerWorkerExtensionsTests
         DefaultAzureCredential credential = new DefaultAzureCredential();
 
         // Act - configure two workers with the same endpoint/taskhub but different ResourceId
-        mockBuilder1.Object.UseDurableTaskScheduler(ValidEndpoint, ValidTaskHub, credential, options => 
+        mockBuilder1.Object.UseDurableTaskScheduler(ValidEndpoint, ValidTaskHub, credential, options =>
         {
             options.ResourceId = "https://durabletask.io";
         });
-        mockBuilder2.Object.UseDurableTaskScheduler(ValidEndpoint, ValidTaskHub, credential, options => 
+        mockBuilder2.Object.UseDurableTaskScheduler(ValidEndpoint, ValidTaskHub, credential, options =>
         {
             options.ResourceId = "https://custom.durabletask.io";
         });
@@ -425,11 +454,11 @@ public class DurableTaskSchedulerWorkerExtensionsTests
         DefaultAzureCredential credential = new DefaultAzureCredential();
 
         // Act - configure two workers with the same endpoint/taskhub but different AllowInsecureCredentials
-        mockBuilder1.Object.UseDurableTaskScheduler(ValidEndpoint, ValidTaskHub, credential, options => 
+        mockBuilder1.Object.UseDurableTaskScheduler(ValidEndpoint, ValidTaskHub, credential, options =>
         {
             options.AllowInsecureCredentials = false;
         });
-        mockBuilder2.Object.UseDurableTaskScheduler(ValidEndpoint, ValidTaskHub, credential, options => 
+        mockBuilder2.Object.UseDurableTaskScheduler(ValidEndpoint, ValidTaskHub, credential, options =>
         {
             options.AllowInsecureCredentials = true;
         });
@@ -460,11 +489,11 @@ public class DurableTaskSchedulerWorkerExtensionsTests
         DefaultAzureCredential credential = new DefaultAzureCredential();
 
         // Act - configure two workers with the same endpoint/taskhub but different WorkerId
-        mockBuilder1.Object.UseDurableTaskScheduler(ValidEndpoint, ValidTaskHub, credential, options => 
+        mockBuilder1.Object.UseDurableTaskScheduler(ValidEndpoint, ValidTaskHub, credential, options =>
         {
             options.WorkerId = "worker-id-1";
         });
-        mockBuilder2.Object.UseDurableTaskScheduler(ValidEndpoint, ValidTaskHub, credential, options => 
+        mockBuilder2.Object.UseDurableTaskScheduler(ValidEndpoint, ValidTaskHub, credential, options =>
         {
             options.WorkerId = "worker-id-2";
         });
@@ -482,14 +511,16 @@ public class DurableTaskSchedulerWorkerExtensionsTests
     }
 
     static Func<GrpcChannel, CancellationToken, Task<GrpcChannel>>? GetChannelRecreator(GrpcDurableTaskWorkerOptions options)
+        => GetInternalOption<Func<GrpcChannel, CancellationToken, Task<GrpcChannel>>>(options, "ChannelRecreator");
+
+    static T? GetInternalOption<T>(GrpcDurableTaskWorkerOptions options, string propertyName)
     {
         object internalOptions = typeof(GrpcDurableTaskWorkerOptions)
             .GetProperty("Internal", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(options)!;
 
-        return (Func<GrpcChannel, CancellationToken, Task<GrpcChannel>>?)internalOptions.GetType()
-            .GetProperty("ChannelRecreator", BindingFlags.Instance | BindingFlags.Public)!
+        return (T?)internalOptions.GetType()
+            .GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public)!
             .GetValue(internalOptions);
     }
 }
-

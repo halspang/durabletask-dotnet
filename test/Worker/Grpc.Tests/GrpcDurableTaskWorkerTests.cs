@@ -255,6 +255,29 @@ public class GrpcDurableTaskWorkerTests
     }
 
     [Fact]
+    public void DispatchWorkItem_HealthPing_NotifiesHandler()
+    {
+        // Arrange
+        P.HealthPing healthPing = new()
+        {
+            ConnectedHost = "scheduler-1",
+        };
+        P.HealthPing? receivedHealthPing = null;
+        GrpcDurableTaskWorker worker = CreateWorker(new GrpcDurableTaskWorkerOptions());
+        P.TaskHubSidecarService.TaskHubSidecarServiceClient client = new(Mock.Of<CallInvoker>());
+        object processor = CreateProcessor(worker, client, ping => receivedHealthPing = ping);
+
+        // Act
+        InvokeDispatchWorkItem(
+            processor,
+            new P.WorkItem { HealthPing = healthPing },
+            CancellationToken.None);
+
+        // Assert
+        receivedHealthPing.Should().BeSameAs(healthPing);
+    }
+
+    [Fact]
     public async Task DispatchWorkItem_ActivityRequest_NotifiesActivityStartAndCompletion()
     {
         // Arrange
@@ -756,14 +779,17 @@ public class GrpcDurableTaskWorkerTests
         return (Task)ExecuteAsyncMethod.Invoke(worker, new object?[] { cancellationToken })!;
     }
 
-    static object CreateProcessor(GrpcDurableTaskWorker worker, P.TaskHubSidecarService.TaskHubSidecarServiceClient client)
+    static object CreateProcessor(
+        GrpcDurableTaskWorker worker,
+        P.TaskHubSidecarService.TaskHubSidecarServiceClient client,
+        Action<P.HealthPing>? healthPingHandler = null)
     {
         System.Type processorType = typeof(GrpcDurableTaskWorker).GetNestedType("Processor", BindingFlags.NonPublic)!;
         return Activator.CreateInstance(
             processorType,
             BindingFlags.Public | BindingFlags.Instance,
             binder: null,
-            args: new object?[] { worker, client, null, null },
+            args: new object?[] { worker, client, null, null, healthPingHandler },
             culture: null)!;
     }
 

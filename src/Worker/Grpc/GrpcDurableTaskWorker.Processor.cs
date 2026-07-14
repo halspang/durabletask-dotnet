@@ -37,16 +37,28 @@ sealed partial class GrpcDurableTaskWorker
         readonly DurableTaskShimFactory shimFactory;
         readonly GrpcDurableTaskWorkerOptions.InternalOptions internalOptions;
         readonly DTCore.IExceptionPropertiesProvider? exceptionPropertiesProvider;
+        readonly Action<P.HealthPing>? healthPingHandler;
         [Obsolete("Experimental")]
         readonly IOrchestrationFilter? orchestrationFilter;
 
         public Processor(GrpcDurableTaskWorker worker, TaskHubSidecarServiceClient client, IOrchestrationFilter? orchestrationFilter = null, IExceptionPropertiesProvider? exceptionPropertiesProvider = null)
+            : this(worker, client, orchestrationFilter, exceptionPropertiesProvider, null)
+        {
+        }
+
+        public Processor(
+            GrpcDurableTaskWorker worker,
+            TaskHubSidecarServiceClient client,
+            IOrchestrationFilter? orchestrationFilter,
+            IExceptionPropertiesProvider? exceptionPropertiesProvider,
+            Action<P.HealthPing>? healthPingHandler)
         {
             this.worker = worker;
             this.client = client;
             this.shimFactory = new DurableTaskShimFactory(this.worker.grpcOptions, this.worker.loggerFactory);
             this.internalOptions = this.worker.grpcOptions.Internal;
             this.orchestrationFilter = orchestrationFilter;
+            this.healthPingHandler = healthPingHandler;
             this.exceptionPropertiesProvider = exceptionPropertiesProvider is not null
                 ? new ExceptionPropertiesProviderAdapter(exceptionPropertiesProvider)
                 : null;
@@ -54,7 +66,12 @@ sealed partial class GrpcDurableTaskWorker
 
         ILogger Logger => this.worker.logger;
 
-        public async Task<ProcessorExitReason> ExecuteAsync(CancellationToken cancellation)
+        public Task<ProcessorExitReason> ExecuteAsync(CancellationToken cancellation)
+            => this.ExecuteConnectionAsync(cancellation, cancellation);
+
+        public async Task<ProcessorExitReason> ExecuteConnectionAsync(
+            CancellationToken connectionCancellation,
+            CancellationToken workCancellation)
         {
             // Tracks consecutive failures against the same channel. Reset only after the stream
             // has actually delivered a message (HelloAsync alone is not proof the channel is healthy).
@@ -64,15 +81,16 @@ sealed partial class GrpcDurableTaskWorker
             int reconnectAttempt = 0;
             Random backoffRandom = GrpcBackoff.CreateRandom();
 
-            while (!cancellation.IsCancellationRequested)
+            while (!connectionCancellation.IsCancellationRequested)
             {
                 bool channelLikelyPoisoned = false;
                 try
                 {
-                    using AsyncServerStreamingCall<P.WorkItem> stream = await this.ConnectAsync(cancellation);
+                    using AsyncServerStreamingCall<P.WorkItem> stream = await this.ConnectAsync(connectionCancellation);
                     await this.ProcessWorkItemsAsync(
                         stream,
-                        cancellation,
+                        connectionCancellation,
+                        workCancellation,
                         onFirstMessage: () =>
                         {
                             consecutiveChannelFailures = 0;
@@ -80,7 +98,7 @@ sealed partial class GrpcDurableTaskWorker
                         },
                         onChannelLikelyPoisoned: () => channelLikelyPoisoned = true);
                 }
-                catch (RpcException) when (cancellation.IsCancellationRequested)
+                catch (RpcException) when (connectionCancellation.IsCancellationRequested)
                 {
                     // Worker is shutting down - let the method exit gracefully
                     return ProcessorExitReason.Shutdown;
@@ -125,7 +143,7 @@ sealed partial class GrpcDurableTaskWorker
                     //    between the scheduler and task hub, it would need to be restarted to function.
                     this.Logger.TaskHubNotFound();
                 }
-                catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+                catch (OperationCanceledException) when (connectionCancellation.IsCancellationRequested)
                 {
                     // Shutting down, lets exit gracefully.
                     return ProcessorExitReason.Shutdown;
@@ -159,9 +177,9 @@ sealed partial class GrpcDurableTaskWorker
                         fullJitter: true);
                     this.Logger.ReconnectBackoff(reconnectAttempt, (int)delay.TotalMilliseconds);
                     reconnectAttempt++;
-                    await Task.Delay(delay, cancellation);
+                    await Task.Delay(delay, connectionCancellation);
                 }
-                catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+                catch (OperationCanceledException) when (connectionCancellation.IsCancellationRequested)
                 {
                     // Worker is shutting down - let the method exit gracefully
                     return ProcessorExitReason.Shutdown;
@@ -339,7 +357,8 @@ sealed partial class GrpcDurableTaskWorker
 
         async Task ProcessWorkItemsAsync(
             AsyncServerStreamingCall<P.WorkItem> stream,
-            CancellationToken cancellation,
+            CancellationToken connectionCancellation,
+            CancellationToken workCancellation,
             Action? onFirstMessage = null,
             Action? onChannelLikelyPoisoned = null)
         {
@@ -355,9 +374,9 @@ sealed partial class GrpcDurableTaskWorker
             WorkItemStreamResult result = await WorkItemStreamConsumer.ConsumeAsync(
                 ct => stream.ResponseStream.ReadAllAsync(ct),
                 silentDisconnectTimeout,
-                workItem => this.DispatchWorkItem(workItem, cancellation),
+                workItem => this.DispatchWorkItem(workItem, workCancellation),
                 onFirstMessage,
-                cancellation);
+                connectionCancellation);
 
             switch (result.Outcome)
             {
@@ -448,11 +467,21 @@ sealed partial class GrpcDurableTaskWorker
             }
             else if (workItem.RequestCase == P.WorkItem.RequestOneofCase.HealthPing)
             {
-                // Health pings are heartbeat-only signals from the backend; the silent-disconnect
-                // timer reset (handled inside WorkItemStreamConsumer) is the actionable behavior.
-                // Logging at Trace allows operators to confirm liveness without flooding info-level
-                // telemetry.
                 this.Logger.ReceivedHealthPing();
+                if (this.healthPingHandler is not null)
+                {
+                    try
+                    {
+                        this.healthPingHandler(workItem.HealthPing);
+                    }
+                    catch (Exception ex) when (ex is not OutOfMemoryException
+                        and not StackOverflowException
+                        and not AccessViolationException
+                        and not ThreadAbortException)
+                    {
+                        this.Logger.HealthPingProcessingFailed(ex);
+                    }
+                }
             }
             else
             {

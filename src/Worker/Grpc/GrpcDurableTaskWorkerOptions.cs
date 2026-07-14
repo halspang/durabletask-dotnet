@@ -171,5 +171,27 @@ public sealed class GrpcDurableTaskWorkerOptions : DurableTaskWorkerOptions
         /// Gets or sets a callback that is invoked when activity work items are received or finished.
         /// </summary>
         public Action<ActivityNotificationPhase>? NotifyActivity { get; set; }
+
+        /// <summary>
+        /// Gets or sets the task hub name used to select scheduler hosts from health pings.
+        /// </summary>
+        public string? TaskHubName { get; set; }
+
+        /// <summary>
+        /// Gets or sets a factory for fresh channels used to probe additional scheduler hosts.
+        /// Each invocation must return a new, independently owned channel.
+        /// </summary>
+        public Func<GrpcChannel>? AdditionalChannelFactory { get; set; }
+
+        /// <summary>
+        /// Gets or sets the maximum time to wait for a new connection to identify its scheduler host.
+        /// Defaults to 30 seconds.
+        /// </summary>
+        public TimeSpan FanOutConnectionTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+        /// <summary>
+        /// Gets or sets the delay between unsuccessful scheduler host probes. Defaults to 1 second.
+        /// </summary>
+        public TimeSpan FanOutRetryDelay { get; set; } = TimeSpan.FromSeconds(1);
     }
 }

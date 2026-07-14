@@ -890,7 +890,13 @@ message CompleteTaskResponse {
 }
 
 message HealthPing {
-    // No payload
+    string connectedHost = 1;
+    repeated TaskHubHosts taskHubHosts = 2;
+}
+
+message TaskHubHosts {
+    string taskHubName = 1;
+    repeated string hosts = 2;
 }
 
 message StreamInstanceHistoryRequest {

@@ -26,6 +26,10 @@ public class GrpcDurableTaskWorkerOptionsInternalTests
         internalOptions.TransientRetryMaxAttempts.Should().Be(10);
         internalOptions.SilentDisconnectTimeout.Should().Be(TimeSpan.FromSeconds(120));
         internalOptions.ChannelRecreator.Should().BeNull();
+        internalOptions.TaskHubName.Should().BeNull();
+        internalOptions.AdditionalChannelFactory.Should().BeNull();
+        internalOptions.FanOutConnectionTimeout.Should().Be(TimeSpan.FromSeconds(30));
+        internalOptions.FanOutRetryDelay.Should().Be(TimeSpan.FromSeconds(1));
     }
 
     [Fact]
@@ -62,5 +66,21 @@ public class GrpcDurableTaskWorkerOptionsInternalTests
         // Sanity-check that invoking the stored delegate calls the original.
         options.Internal.ChannelRecreator!.Invoke(null!, CancellationToken.None);
         invoked.Should().BeTrue();
+    }
+
+    [Fact]
+    public void ConfigureConnectionFanOut_StoresTaskHubAndChannelFactory()
+    {
+        // Arrange
+        GrpcDurableTaskWorkerOptions options = new();
+        using GrpcChannel channel = GrpcChannel.ForAddress("http://localhost");
+        Func<GrpcChannel> channelFactory = () => channel;
+
+        // Act
+        options.ConfigureConnectionFanOut("test-hub", channelFactory);
+
+        // Assert
+        options.Internal.TaskHubName.Should().Be("test-hub");
+        options.Internal.AdditionalChannelFactory.Should().BeSameAs(channelFactory);
     }
 }

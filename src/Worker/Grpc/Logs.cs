@@ -107,5 +107,29 @@ namespace Microsoft.DurableTask.Worker.Grpc
 
         [LoggerMessage(EventId = 78, Level = LogLevel.Warning, Message = "Activity notification callback failed for phase '{Phase}'.")]
         public static partial void ActivityNotificationFailed(this ILogger logger, ActivityNotificationPhase phase, Exception exception);
+
+        [LoggerMessage(EventId = 79, Level = LogLevel.Debug, Message = "Scheduler host '{ConnectedHost}' advertised {HostCount} host(s) with work for task hub '{TaskHubName}'.")]
+        public static partial void FanOutTopologyObserved(this ILogger logger, string connectedHost, string taskHubName, int hostCount);
+
+        [LoggerMessage(EventId = 80, Level = LogLevel.Debug, Message = "Opening an additional worker connection to discover a missing scheduler host for task hub '{TaskHubName}'.")]
+        public static partial void FanOutProbeStarted(this ILogger logger, string taskHubName);
+
+        [LoggerMessage(EventId = 81, Level = LogLevel.Information, Message = "Additional worker connection established with scheduler host '{ConnectedHost}'.")]
+        public static partial void FanOutConnectionAccepted(this ILogger logger, string connectedHost);
+
+        [LoggerMessage(EventId = 82, Level = LogLevel.Debug, Message = "Closing additional worker connection to duplicate or unavailable scheduler host '{ConnectedHost}'.")]
+        public static partial void FanOutConnectionRejected(this ILogger logger, string connectedHost);
+
+        [LoggerMessage(EventId = 83, Level = LogLevel.Information, Message = "Closing additional worker connection to scheduler host '{ConnectedHost}' because it is no longer advertised for the task hub.")]
+        public static partial void FanOutConnectionRetired(this ILogger logger, string connectedHost);
+
+        [LoggerMessage(EventId = 84, Level = LogLevel.Warning, Message = "Additional worker connection did not identify its scheduler host within {Timeout}.")]
+        public static partial void FanOutProbeTimedOut(this ILogger logger, TimeSpan timeout);
+
+        [LoggerMessage(EventId = 85, Level = LogLevel.Warning, Message = "Additional worker connection failed.")]
+        public static partial void FanOutConnectionFailed(this ILogger logger, Exception exception);
+
+        [LoggerMessage(EventId = 86, Level = LogLevel.Warning, Message = "Failed to process scheduler topology from a health ping.")]
+        public static partial void HealthPingProcessingFailed(this ILogger logger, Exception exception);
     }
 }
