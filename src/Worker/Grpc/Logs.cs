@@ -107,5 +107,13 @@ namespace Microsoft.DurableTask.Worker.Grpc
 
         [LoggerMessage(EventId = 78, Level = LogLevel.Warning, Message = "Activity notification callback failed for phase '{Phase}'.")]
         public static partial void ActivityNotificationFailed(this ILogger logger, ActivityNotificationPhase phase, Exception exception);
+
+        [LoggerMessage(EventId = 79, Level = LogLevel.Warning, Message = "Worker operation completion callback failed for {Kind} operation '{Name}' with count {Count}.")]
+        public static partial void OperationCompletionNotificationFailed(
+            this ILogger logger,
+            DurableTaskWorkerOperationKind kind,
+            string name,
+            int count,
+            Exception exception);
     }
 }

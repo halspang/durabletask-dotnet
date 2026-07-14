@@ -481,6 +481,70 @@ sealed partial class GrpcDurableTaskWorker
             }
         }
 
+        void NotifyOperationCompleted(DurableTaskWorkerOperation operation)
+        {
+            Action<DurableTaskWorkerOperation>? callback = this.worker.workerOptions.OperationCompleted;
+            if (callback is null)
+            {
+                return;
+            }
+
+            try
+            {
+                callback(operation);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException
+                and not StackOverflowException
+                and not AccessViolationException
+                and not ThreadAbortException)
+            {
+                this.Logger.OperationCompletionNotificationFailed(
+                    operation.Kind,
+                    operation.Name,
+                    operation.Count,
+                    ex);
+            }
+        }
+
+        void NotifyOrchestrationActionsCompleted(IEnumerable<P.OrchestratorAction> actions)
+        {
+            if (this.worker.workerOptions.OperationCompleted is null)
+            {
+                return;
+            }
+
+            foreach (IGrouping<P.OrchestratorAction.OrchestratorActionTypeOneofCase, P.OrchestratorAction> group
+                in actions.GroupBy(action => action.OrchestratorActionTypeCase))
+            {
+                this.NotifyOperationCompleted(new DurableTaskWorkerOperation(
+                    DurableTaskWorkerOperationKind.OrchestrationAction,
+                    group.Key.ToString(),
+                    group.Count()));
+            }
+        }
+
+        void NotifyEntityOperationsCompleted(
+            EntityBatchRequest batchRequest,
+            int completedResultCount,
+            string taskName)
+        {
+            if (this.worker.workerOptions.OperationCompleted is null || completedResultCount == 0)
+            {
+                return;
+            }
+
+            foreach (IGrouping<string, OperationRequest> group in batchRequest.Operations!
+                .Take(completedResultCount)
+                .GroupBy(operation => operation.Operation ?? string.Empty, StringComparer.Ordinal))
+            {
+                this.NotifyOperationCompleted(new DurableTaskWorkerOperation(
+                    DurableTaskWorkerOperationKind.EntityOperation,
+                    group.Key,
+                    group.Count(),
+                    taskName));
+            }
+        }
+
         void RunBackgroundTask(P.WorkItem? workItem, Func<Task> handler, CancellationToken cancellation)
         {
             // TODO: is Task.Run appropriate here? Should we have finer control over the tasks and their threads?
@@ -1016,6 +1080,10 @@ sealed partial class GrpcDurableTaskWorker
                 async () => await this.client.CompleteActivityTaskAsync(response, cancellationToken: cancellation),
                 nameof(this.client.CompleteActivityTaskAsync),
                 cancellation);
+            this.NotifyOperationCompleted(new DurableTaskWorkerOperation(
+                DurableTaskWorkerOperationKind.Activity,
+                request.Name,
+                1));
         }
 
         async Task OnRunEntityBatchAsync(
@@ -1085,6 +1153,10 @@ sealed partial class GrpcDurableTaskWorker
                 async () => await this.client.CompleteEntityTaskAsync(response, cancellationToken: cancellation),
                 nameof(this.client.CompleteEntityTaskAsync),
                 cancellation);
+            this.NotifyEntityOperationsCompleted(
+                batchRequest,
+                batchResult.Results?.Count ?? 0,
+                entityId.Name);
         }
 
         /// <summary>
@@ -1150,6 +1222,7 @@ sealed partial class GrpcDurableTaskWorker
                     async () => await this.client.CompleteOrchestratorTaskAsync(failureResponse, cancellationToken: cancellationToken),
                     nameof(this.client.CompleteOrchestratorTaskAsync),
                     cancellationToken);
+                this.NotifyOrchestrationActionsCompleted(failureResponse.Actions);
                 return;
             }
 
@@ -1180,6 +1253,7 @@ sealed partial class GrpcDurableTaskWorker
                     async () => await this.client.CompleteOrchestratorTaskAsync(response, cancellationToken: cancellationToken),
                     nameof(this.client.CompleteOrchestratorTaskAsync),
                     cancellationToken);
+                this.NotifyOrchestrationActionsCompleted(response.Actions);
                 return;
             }
 
@@ -1246,6 +1320,8 @@ sealed partial class GrpcDurableTaskWorker
                     nameof(this.client.CompleteOrchestratorTaskAsync),
                     cancellationToken);
             }
+
+            this.NotifyOrchestrationActionsCompleted(response.Actions);
         }
 
         async Task ExecuteWithRetryAsync(

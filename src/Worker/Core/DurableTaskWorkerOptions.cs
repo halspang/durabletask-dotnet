@@ -166,6 +166,23 @@ public class DurableTaskWorkerOptions
     public LoggingOptions Logging { get; } = new();
 
     /// <summary>
+    /// Gets or sets a callback invoked after the backend accepts completed user operations.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The callback is invoked synchronously after the corresponding backend completion call succeeds, including any
+    /// SDK retries. It is not invoked for abandoned or rejected work items. Orchestration actions and entity operations
+    /// with the same name may be grouped into a single callback with a
+    /// <see cref="DurableTaskWorkerOperation.Count"/> greater than one.
+    /// </para><para>
+    /// Worker operations can complete concurrently, so the callback must be thread-safe. Exceptions thrown by the
+    /// callback are logged and ignored so they cannot fail or abandon completed user work. Setting this property more
+    /// than once replaces the previously configured callback.
+    /// </para>
+    /// </remarks>
+    public Action<DurableTaskWorkerOperation>? OperationCompleted { get; set; }
+
+    /// <summary>
     /// Gets a value indicating whether <see cref="DataConverter" /> was explicitly set or not.
     /// </summary>
     /// <remarks>
@@ -192,6 +209,7 @@ public class DurableTaskWorkerOptions
             other.Versioning = this.Versioning;
             other.OrchestrationFilter = this.OrchestrationFilter;
             other.Logging.UseLegacyCategories = this.Logging.UseLegacyCategories;
+            other.OperationCompleted = this.OperationCompleted;
         }
     }
 

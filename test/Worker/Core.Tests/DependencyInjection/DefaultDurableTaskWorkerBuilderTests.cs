@@ -44,9 +44,14 @@ public class DefaultDurableTaskWorkerBuilderTests
     public void UseBuildTargetT_ValidTypeWithOptions_Sets()
     {
         JsonDataConverter converter = new();
+        Action<DurableTaskWorkerOperation> operationCompleted = _ => { };
         ServiceCollection services = new();
         DefaultDurableTaskWorkerBuilder builder = new("test", services);
-        builder.Configure(opt => opt.DataConverter = converter);
+        builder.Configure(opt =>
+        {
+            opt.DataConverter = converter;
+            opt.OperationCompleted = operationCompleted;
+        });
         builder.UseBuildTarget<GoodBuildTarget, GoodBuildTargetOptions>();
         IHostedService client = builder.Build(services.BuildServiceProvider());
 
@@ -54,6 +59,7 @@ public class DefaultDurableTaskWorkerBuilderTests
         target.Name.Should().Be("test");
         target.Options.Should().NotBeNull();
         target.Options.DataConverter.Should().BeSameAs(converter);
+        target.Options.OperationCompleted.Should().BeSameAs(operationCompleted);
     }
 
     [Fact]
