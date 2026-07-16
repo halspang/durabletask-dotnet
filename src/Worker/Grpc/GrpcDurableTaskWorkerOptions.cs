@@ -187,7 +187,7 @@ public sealed class GrpcDurableTaskWorkerOptions : DurableTaskWorkerOptions
         /// Gets or sets the maximum time to wait for a new connection to identify its scheduler host.
         /// Defaults to 30 seconds.
         /// </summary>
-        public TimeSpan FanOutConnectionTimeout { get; set; } = TimeSpan.FromSeconds(30);
+        public TimeSpan FanOutConnectionTimeout { get; set; } = TimeSpan.FromSeconds(120);
 
         /// <summary>
         /// Gets or sets the delay between unsuccessful scheduler host probes. Defaults to 1 second.

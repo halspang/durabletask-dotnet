@@ -2,13 +2,11 @@
 // Licensed under the MIT License.
 
 using System.Diagnostics;
-using System.Linq;
 using System.Text;
 using DurableTask.Core;
 using DurableTask.Core.Entities;
 using DurableTask.Core.Entities.OperationFormat;
 using DurableTask.Core.History;
-using Google.Protobuf;
 using Microsoft.DurableTask.Abstractions;
 using Microsoft.DurableTask.Entities;
 using Microsoft.DurableTask.Tracing;
@@ -467,7 +465,8 @@ sealed partial class GrpcDurableTaskWorker
             }
             else if (workItem.RequestCase == P.WorkItem.RequestOneofCase.HealthPing)
             {
-                this.Logger.ReceivedHealthPing();
+                this.Logger.ReceivedHealthPing(workItem.HealthPing.ConnectedHost);
+                this.Logger.LogInformation($"=== Available Hosts: {string.Join(", ", workItem.HealthPing.TaskHubHosts.Select(h => $"{h.TaskHubName}: [{string.Join(",", h.Hosts)}]"))} ===");
                 if (this.healthPingHandler is not null)
                 {
                     try

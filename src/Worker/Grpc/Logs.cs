@@ -96,8 +96,8 @@ namespace Microsoft.DurableTask.Worker.Grpc
         [LoggerMessage(EventId = 74, Level = LogLevel.Debug, Message = "Reconnect attempt {attempt} will retry after {delayMs} ms.")]
         public static partial void ReconnectBackoff(this ILogger logger, int attempt, int delayMs);
 
-        [LoggerMessage(EventId = 75, Level = LogLevel.Trace, Message = "Received health ping from the backend.")]
-        public static partial void ReceivedHealthPing(this ILogger logger);
+        [LoggerMessage(EventId = 75, Level = LogLevel.Information, Message = "Received health ping from the backend ({host}).")]
+        public static partial void ReceivedHealthPing(this ILogger logger, string host);
 
         [LoggerMessage(EventId = 76, Level = LogLevel.Information, Message = "Work-item stream ended by the backend (graceful close). Will reconnect.")]
         public static partial void StreamEndedByPeer(this ILogger logger);
