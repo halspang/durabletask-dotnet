@@ -1,4 +1,4 @@
-﻿// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
 using System.ComponentModel.DataAnnotations;
@@ -84,7 +84,17 @@ public class DurableTaskSchedulerWorkerOptions
     /// Creates a gRPC channel for communicating with the Durable Task Scheduler service.
     /// </summary>
     /// <returns>A configured <see cref="GrpcChannel"/> instance that can be used to make gRPC calls.</returns>
-    internal GrpcChannel CreateChannel()
+    internal GrpcChannel CreateChannel() => this.CreateChannel(null);
+
+    /// <summary>
+    /// Creates a gRPC channel for communicating with a specific Durable Task Scheduler host.
+    /// </summary>
+    /// <param name="affinityId">
+    /// The App Service instance ID to target using an ARR affinity cookie, or <see langword="null"/>
+    /// to let the load balancer select a host.
+    /// </param>
+    /// <returns>A configured <see cref="GrpcChannel"/> instance that can be used to make gRPC calls.</returns>
+    internal GrpcChannel CreateChannel(string? affinityId)
     {
         Verify.NotNull(this.EndpointAddress, nameof(this.EndpointAddress));
         Verify.NotNull(this.TaskHubName, nameof(this.TaskHubName));
@@ -119,12 +129,26 @@ public class DurableTaskSchedulerWorkerOptions
         ChannelCredentials channelCreds = endpoint.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ?
             ChannelCredentials.SecureSsl :
             ChannelCredentials.Insecure;
-        return GrpcChannel.ForAddress(endpoint, new GrpcChannelOptions
+        GrpcChannelOptions channelOptions = new()
         {
             Credentials = ChannelCredentials.Create(channelCreds, managedBackendCreds),
             UnsafeUseInsecureChannelCallCredentials = this.AllowInsecureCredentials,
             ServiceConfig = GrpcRetryPolicyDefaults.DefaultServiceConfig,
-        });
+        };
+
+        if (affinityId is not null)
+        {
+            channelOptions.HttpHandler = new ArrAffinityMessageHandler(
+                affinityId,
+                new SocketsHttpHandler
+                {
+                    EnableMultipleHttp2Connections = true,
+                    UseCookies = false,
+                });
+            channelOptions.DisposeHttpClient = true;
+        }
+
+        return GrpcChannel.ForAddress(endpoint, channelOptions);
     }
 
     static TokenCredential? GetCredentialFromConnectionString(DurableTaskSchedulerConnectionString connectionString)

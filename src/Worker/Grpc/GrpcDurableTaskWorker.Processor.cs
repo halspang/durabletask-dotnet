@@ -36,11 +36,12 @@ sealed partial class GrpcDurableTaskWorker
         readonly GrpcDurableTaskWorkerOptions.InternalOptions internalOptions;
         readonly DTCore.IExceptionPropertiesProvider? exceptionPropertiesProvider;
         readonly Action<P.HealthPing>? healthPingHandler;
+        readonly bool useDirectTopologyDiscovery;
         [Obsolete("Experimental")]
         readonly IOrchestrationFilter? orchestrationFilter;
 
         public Processor(GrpcDurableTaskWorker worker, TaskHubSidecarServiceClient client, IOrchestrationFilter? orchestrationFilter = null, IExceptionPropertiesProvider? exceptionPropertiesProvider = null)
-            : this(worker, client, orchestrationFilter, exceptionPropertiesProvider, null)
+            : this(worker, client, orchestrationFilter, exceptionPropertiesProvider, null, false)
         {
         }
 
@@ -49,7 +50,8 @@ sealed partial class GrpcDurableTaskWorker
             TaskHubSidecarServiceClient client,
             IOrchestrationFilter? orchestrationFilter,
             IExceptionPropertiesProvider? exceptionPropertiesProvider,
-            Action<P.HealthPing>? healthPingHandler)
+            Action<P.HealthPing>? healthPingHandler,
+            bool useDirectTopologyDiscovery)
         {
             this.worker = worker;
             this.client = client;
@@ -57,6 +59,7 @@ sealed partial class GrpcDurableTaskWorker
             this.internalOptions = this.worker.grpcOptions.Internal;
             this.orchestrationFilter = orchestrationFilter;
             this.healthPingHandler = healthPingHandler;
+            this.useDirectTopologyDiscovery = useDirectTopologyDiscovery;
             this.exceptionPropertiesProvider = exceptionPropertiesProvider is not null
                 ? new ExceptionPropertiesProviderAdapter(exceptionPropertiesProvider)
                 : null;
@@ -318,22 +321,26 @@ sealed partial class GrpcDurableTaskWorker
 
         async Task<AsyncServerStreamingCall<P.WorkItem>> ConnectAsync(CancellationToken cancellation)
         {
-            TimeSpan helloDeadline = this.internalOptions.HelloDeadline;
-            DateTime? deadline = null;
-
-            if (helloDeadline > TimeSpan.Zero)
+            static DateTime? GetDeadline(TimeSpan timeout)
             {
-                // Clamp to a UTC DateTime.MaxValue so a misconfigured (very large) HelloDeadline cannot
-                // throw ArgumentOutOfRangeException out of DateTime.Add and so the gRPC deadline remains
-                // unambiguous during internal normalization.
+                if (timeout <= TimeSpan.Zero)
+                {
+                    return null;
+                }
+
+                // Clamp to a UTC DateTime.MaxValue so a very large timeout cannot overflow DateTime.Add.
                 DateTime now = DateTime.UtcNow;
                 DateTime maxDeadlineUtc = DateTime.SpecifyKind(DateTime.MaxValue, DateTimeKind.Utc);
                 TimeSpan maxOffset = maxDeadlineUtc - now;
-                deadline = helloDeadline >= maxOffset ? maxDeadlineUtc : now.Add(helloDeadline);
+                return timeout >= maxOffset ? maxDeadlineUtc : now.Add(timeout);
             }
+
+            TimeSpan helloDeadline = this.internalOptions.HelloDeadline;
+            DateTime? deadline = GetDeadline(helloDeadline);
 
             await this.client!.HelloAsync(EmptyMessage, deadline: deadline, cancellationToken: cancellation);
             this.Logger.EstablishedWorkItemConnection();
+            await this.TryGetTaskHubHostsAsync(cancellation);
 
             DurableTaskWorkerOptions workerOptions = this.worker.workerOptions;
 
@@ -351,6 +358,51 @@ sealed partial class GrpcDurableTaskWorker
                     WorkItemFilters = this.worker.workItemFilters?.ToGrpcWorkItemFilters(),
                 },
                 cancellationToken: cancellation);
+        }
+
+        async Task TryGetTaskHubHostsAsync(CancellationToken cancellation)
+        {
+            TimeSpan discoveryTimeout = this.internalOptions.FanOutDiscoveryTimeout;
+            if (!this.useDirectTopologyDiscovery
+                || this.healthPingHandler is null
+                || !this.worker.grpcOptions.Capabilities.Contains(P.WorkerCapability.FanOut)
+                || discoveryTimeout <= TimeSpan.Zero
+                || Volatile.Read(ref this.worker.taskHubHostsRpcUnavailable) == 1)
+            {
+                return;
+            }
+
+            try
+            {
+                DateTime now = DateTime.UtcNow;
+                DateTime maxDeadlineUtc = DateTime.SpecifyKind(DateTime.MaxValue, DateTimeKind.Utc);
+                TimeSpan maxOffset = maxDeadlineUtc - now;
+                DateTime deadline = discoveryTimeout >= maxOffset
+                    ? maxDeadlineUtc
+                    : now.Add(discoveryTimeout);
+                P.HealthPing healthPing = await this.client.GetTaskHubHostsAsync(
+                    EmptyMessage,
+                    deadline: deadline,
+                    cancellationToken: cancellation);
+                this.Logger.FanOutTopologySnapshotReceived(healthPing.ConnectedHost);
+                this.NotifyTopology(healthPing);
+            }
+            catch (RpcException ex) when (ex.StatusCode == StatusCode.Unimplemented)
+            {
+                if (Interlocked.Exchange(ref this.worker.taskHubHostsRpcUnavailable, 1) == 0)
+                {
+                    this.Logger.FanOutDiscoveryRpcUnavailable();
+                }
+            }
+            catch (RpcException ex) when (ex.StatusCode == StatusCode.Cancelled
+                && cancellation.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (RpcException ex)
+            {
+                this.Logger.FanOutDiscoveryRpcFailed(ex);
+            }
         }
 
         async Task ProcessWorkItemsAsync(
@@ -466,25 +518,29 @@ sealed partial class GrpcDurableTaskWorker
             else if (workItem.RequestCase == P.WorkItem.RequestOneofCase.HealthPing)
             {
                 this.Logger.ReceivedHealthPing(workItem.HealthPing.ConnectedHost);
-                this.Logger.LogInformation($"=== Available Hosts: {string.Join(", ", workItem.HealthPing.TaskHubHosts.Select(h => $"{h.TaskHubName}: [{string.Join(",", h.Hosts)}]"))} ===");
-                if (this.healthPingHandler is not null)
-                {
-                    try
-                    {
-                        this.healthPingHandler(workItem.HealthPing);
-                    }
-                    catch (Exception ex) when (ex is not OutOfMemoryException
-                        and not StackOverflowException
-                        and not AccessViolationException
-                        and not ThreadAbortException)
-                    {
-                        this.Logger.HealthPingProcessingFailed(ex);
-                    }
-                }
+                this.NotifyTopology(workItem.HealthPing);
             }
             else
             {
                 this.Logger.UnexpectedWorkItemType(workItem.RequestCase.ToString());
+            }
+        }
+
+        void NotifyTopology(P.HealthPing healthPing)
+        {
+            if (this.healthPingHandler is not null)
+            {
+                try
+                {
+                    this.healthPingHandler(healthPing);
+                }
+                catch (Exception ex) when (ex is not OutOfMemoryException
+                    and not StackOverflowException
+                    and not AccessViolationException
+                    and not ThreadAbortException)
+                {
+                    this.Logger.HealthPingProcessingFailed(ex);
+                }
             }
         }
 

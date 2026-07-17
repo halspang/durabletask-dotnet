@@ -11,6 +11,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Moq;
 using Xunit;
+using P = Microsoft.DurableTask.Protobuf;
 
 namespace Microsoft.DurableTask.Worker.AzureManaged.Tests;
 
@@ -242,16 +243,18 @@ public class DurableTaskSchedulerWorkerExtensionsTests
             .Create(Options.DefaultName);
 
         // Act
-        Func<GrpcChannel>? channelFactory = GetInternalOption<Func<GrpcChannel>>(options, "AdditionalChannelFactory");
+        Func<string, GrpcChannel>? channelFactory =
+            GetInternalOption<Func<string, GrpcChannel>>(options, "AdditionalChannelFactory");
         channelFactory.Should().NotBeNull();
-        using GrpcChannel firstChannel = channelFactory!();
-        using GrpcChannel secondChannel = channelFactory();
+        using GrpcChannel firstChannel = channelFactory!("instance-a");
+        using GrpcChannel secondChannel = channelFactory("instance-b");
 
         // Assert
         GetInternalOption<string>(options, "TaskHubName").Should().Be(ValidTaskHub);
         firstChannel.Should().NotBeSameAs(options.Channel);
         secondChannel.Should().NotBeSameAs(options.Channel);
         secondChannel.Should().NotBeSameAs(firstChannel);
+        options.Capabilities.Should().Contain(P.WorkerCapability.FanOut);
     }
 
     [Fact]

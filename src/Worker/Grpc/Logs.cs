@@ -1,4 +1,4 @@
-﻿// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
 using Microsoft.DurableTask.Worker.Grpc.Internal;
@@ -111,25 +111,37 @@ namespace Microsoft.DurableTask.Worker.Grpc
         [LoggerMessage(EventId = 79, Level = LogLevel.Debug, Message = "Scheduler host '{ConnectedHost}' advertised {HostCount} host(s) with work for task hub '{TaskHubName}'.")]
         public static partial void FanOutTopologyObserved(this ILogger logger, string connectedHost, string taskHubName, int hostCount);
 
-        [LoggerMessage(EventId = 80, Level = LogLevel.Debug, Message = "Opening an additional worker connection to discover a missing scheduler host for task hub '{TaskHubName}'.")]
-        public static partial void FanOutProbeStarted(this ILogger logger, string taskHubName);
+        [LoggerMessage(EventId = 80, Level = LogLevel.Debug, Message = "Opening an additional worker connection targeting scheduler host '{TargetHost}' for task hub '{TaskHubName}'.")]
+        public static partial void FanOutProbeStarted(this ILogger logger, string taskHubName, string targetHost);
 
         [LoggerMessage(EventId = 81, Level = LogLevel.Information, Message = "Additional worker connection established with scheduler host '{ConnectedHost}'.")]
         public static partial void FanOutConnectionAccepted(this ILogger logger, string connectedHost);
 
-        [LoggerMessage(EventId = 82, Level = LogLevel.Debug, Message = "Closing additional worker connection to duplicate or unavailable scheduler host '{ConnectedHost}'.")]
-        public static partial void FanOutConnectionRejected(this ILogger logger, string connectedHost);
+        [LoggerMessage(EventId = 82, Level = LogLevel.Debug, Message = "Closing additional worker connection because affinity target '{TargetHost}' reached scheduler host '{ConnectedHost}'.")]
+        public static partial void FanOutConnectionRejected(this ILogger logger, string targetHost, string connectedHost);
 
         [LoggerMessage(EventId = 83, Level = LogLevel.Information, Message = "Closing additional worker connection to scheduler host '{ConnectedHost}' because it is no longer advertised for the task hub.")]
         public static partial void FanOutConnectionRetired(this ILogger logger, string connectedHost);
 
-        [LoggerMessage(EventId = 84, Level = LogLevel.Warning, Message = "Additional worker connection did not identify its scheduler host within {Timeout}.")]
-        public static partial void FanOutProbeTimedOut(this ILogger logger, TimeSpan timeout);
+        [LoggerMessage(EventId = 84, Level = LogLevel.Warning, Message = "Additional worker connection targeting scheduler host '{TargetHost}' did not identify its connected host within {Timeout}.")]
+        public static partial void FanOutProbeTimedOut(this ILogger logger, string targetHost, TimeSpan timeout);
 
         [LoggerMessage(EventId = 85, Level = LogLevel.Warning, Message = "Additional worker connection failed.")]
         public static partial void FanOutConnectionFailed(this ILogger logger, Exception exception);
 
         [LoggerMessage(EventId = 86, Level = LogLevel.Warning, Message = "Failed to process scheduler topology from a health ping.")]
         public static partial void HealthPingProcessingFailed(this ILogger logger, Exception exception);
+
+        [LoggerMessage(EventId = 87, Level = LogLevel.Warning, Message = "Additional worker connection lost affinity for scheduler host '{TargetHost}' and is now connected to '{ConnectedHost}'.")]
+        public static partial void FanOutAffinityLost(this ILogger logger, string targetHost, string connectedHost);
+
+        [LoggerMessage(EventId = 88, Level = LogLevel.Debug, Message = "The backend does not implement direct scheduler host discovery. Continuing with health-ping discovery.")]
+        public static partial void FanOutDiscoveryRpcUnavailable(this ILogger logger);
+
+        [LoggerMessage(EventId = 89, Level = LogLevel.Warning, Message = "Direct scheduler host discovery failed. Continuing with health-ping discovery.")]
+        public static partial void FanOutDiscoveryRpcFailed(this ILogger logger, Exception exception);
+
+        [LoggerMessage(EventId = 90, Level = LogLevel.Debug, Message = "Received a direct scheduler host topology snapshot from '{ConnectedHost}'.")]
+        public static partial void FanOutTopologySnapshotReceived(this ILogger logger, string connectedHost);
     }
 }

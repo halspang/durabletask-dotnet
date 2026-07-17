@@ -183,7 +183,9 @@ public static class DurableTaskSchedulerWorkerExtensions
             }
 
             options.SetChannelRecreator((oldChannel, ct) => this.RecreateChannelAsync(cacheKey, source, oldChannel, ct));
-            options.ConfigureConnectionFanOut(source.TaskHubName, source.CreateChannel);
+            options.ConfigureConnectionFanOut(
+                source.TaskHubName,
+                affinityId => source.CreateChannel(affinityId));
             options.ConfigureForAzureManaged();
         }
 

@@ -255,6 +255,98 @@ public class GrpcDurableTaskWorkerTests
     }
 
     [Fact]
+    public async Task ProcessorConnectAsync_FanOutCapability_UsesDirectTopologySnapshot()
+    {
+        // Arrange
+        P.HealthPing topology = new()
+        {
+            ConnectedHost = "host-a",
+        };
+        GrpcDurableTaskWorkerOptions grpcOptions = new();
+        grpcOptions.Capabilities.Add(P.WorkerCapability.FanOut);
+        ScriptedWorkerCallInvoker callInvoker = new(
+            helloFactory: static (callNumber, options) => CreateUnaryCall(Task.FromResult(new Empty())),
+            getWorkItemsFactory: static (callNumber, options) => CreateServerStreamingCall(
+                new SequenceAsyncStreamReader<P.WorkItem>()),
+            getTaskHubHostsFactory: (callNumber, options) =>
+                CreateUnaryCall(Task.FromResult(topology)));
+        P.HealthPing? receivedTopology = null;
+        GrpcDurableTaskWorker worker = CreateWorker(grpcOptions);
+        object processor = CreateProcessor(
+            worker,
+            new P.TaskHubSidecarService.TaskHubSidecarServiceClient(callInvoker),
+            healthPing => receivedTopology = healthPing,
+            useDirectTopologyDiscovery: true);
+
+        // Act
+        using AsyncServerStreamingCall<P.WorkItem> stream = await InvokeProcessorConnectAsync(processor);
+
+        // Assert
+        callInvoker.GetTaskHubHostsCallCount.Should().Be(1);
+        callInvoker.GetWorkItemsCallCount.Should().Be(1);
+        receivedTopology.Should().BeSameAs(topology);
+    }
+
+    [Fact]
+    public async Task ProcessorConnectAsync_DirectTopologyUnavailable_FallsBackToHealthPings()
+    {
+        // Arrange
+        GrpcDurableTaskWorkerOptions grpcOptions = new();
+        grpcOptions.Capabilities.Add(P.WorkerCapability.FanOut);
+        ScriptedWorkerCallInvoker callInvoker = new(
+            helloFactory: static (callNumber, options) => CreateUnaryCall(Task.FromResult(new Empty())),
+            getWorkItemsFactory: static (callNumber, options) => CreateServerStreamingCall(
+                new SequenceAsyncStreamReader<P.WorkItem>()),
+            getTaskHubHostsFactory: static (callNumber, options) => CreateUnaryCall(
+                Task.FromException<P.HealthPing>(
+                    new RpcException(new Status(StatusCode.Unimplemented, "not supported")))));
+        GrpcDurableTaskWorker worker = CreateWorker(grpcOptions);
+        object processor = CreateProcessor(
+            worker,
+            new P.TaskHubSidecarService.TaskHubSidecarServiceClient(callInvoker),
+            _ => { },
+            useDirectTopologyDiscovery: true);
+
+        // Act
+        using AsyncServerStreamingCall<P.WorkItem> firstStream =
+            await InvokeProcessorConnectAsync(processor);
+        using AsyncServerStreamingCall<P.WorkItem> secondStream =
+            await InvokeProcessorConnectAsync(processor);
+
+        // Assert
+        callInvoker.GetTaskHubHostsCallCount.Should().Be(1);
+        callInvoker.GetWorkItemsCallCount.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task ProcessorConnectAsync_DirectTopologyDisabled_OpensHeartbeatStreamImmediately()
+    {
+        // Arrange
+        GrpcDurableTaskWorkerOptions grpcOptions = new();
+        grpcOptions.Capabilities.Add(P.WorkerCapability.FanOut);
+        grpcOptions.Internal.FanOutDiscoveryTimeout = TimeSpan.Zero;
+        ScriptedWorkerCallInvoker callInvoker = new(
+            helloFactory: static (callNumber, options) => CreateUnaryCall(Task.FromResult(new Empty())),
+            getWorkItemsFactory: static (callNumber, options) => CreateServerStreamingCall(
+                new SequenceAsyncStreamReader<P.WorkItem>()),
+            getTaskHubHostsFactory: static (callNumber, options) =>
+                throw new InvalidOperationException("Direct discovery should be skipped."));
+        GrpcDurableTaskWorker worker = CreateWorker(grpcOptions);
+        object processor = CreateProcessor(
+            worker,
+            new P.TaskHubSidecarService.TaskHubSidecarServiceClient(callInvoker),
+            _ => { },
+            useDirectTopologyDiscovery: true);
+
+        // Act
+        using AsyncServerStreamingCall<P.WorkItem> stream = await InvokeProcessorConnectAsync(processor);
+
+        // Assert
+        callInvoker.GetTaskHubHostsCallCount.Should().Be(0);
+        callInvoker.GetWorkItemsCallCount.Should().Be(1);
+    }
+
+    [Fact]
     public void DispatchWorkItem_HealthPing_NotifiesHandler()
     {
         // Arrange
@@ -782,14 +874,23 @@ public class GrpcDurableTaskWorkerTests
     static object CreateProcessor(
         GrpcDurableTaskWorker worker,
         P.TaskHubSidecarService.TaskHubSidecarServiceClient client,
-        Action<P.HealthPing>? healthPingHandler = null)
+        Action<P.HealthPing>? healthPingHandler = null,
+        bool useDirectTopologyDiscovery = false)
     {
         System.Type processorType = typeof(GrpcDurableTaskWorker).GetNestedType("Processor", BindingFlags.NonPublic)!;
         return Activator.CreateInstance(
             processorType,
             BindingFlags.Public | BindingFlags.Instance,
             binder: null,
-            args: new object?[] { worker, client, null, null, healthPingHandler },
+            args: new object?[]
+            {
+                worker,
+                client,
+                null,
+                null,
+                healthPingHandler,
+                useDirectTopologyDiscovery,
+            },
             culture: null)!;
     }
 
@@ -1029,20 +1130,26 @@ public class GrpcDurableTaskWorkerTests
     {
         readonly Func<int, CallOptions, AsyncUnaryCall<Empty>> helloFactory;
         readonly Func<int, CallOptions, AsyncServerStreamingCall<P.WorkItem>> getWorkItemsFactory;
+        readonly Func<int, CallOptions, AsyncUnaryCall<P.HealthPing>>? getTaskHubHostsFactory;
         int helloCallCount;
         int getWorkItemsCallCount;
+        int getTaskHubHostsCallCount;
 
         public ScriptedWorkerCallInvoker(
             Func<int, CallOptions, AsyncUnaryCall<Empty>> helloFactory,
-            Func<int, CallOptions, AsyncServerStreamingCall<P.WorkItem>> getWorkItemsFactory)
+            Func<int, CallOptions, AsyncServerStreamingCall<P.WorkItem>> getWorkItemsFactory,
+            Func<int, CallOptions, AsyncUnaryCall<P.HealthPing>>? getTaskHubHostsFactory = null)
         {
             this.helloFactory = helloFactory;
             this.getWorkItemsFactory = getWorkItemsFactory;
+            this.getTaskHubHostsFactory = getTaskHubHostsFactory;
         }
 
         public int HelloCallCount => Volatile.Read(ref this.helloCallCount);
 
         public int GetWorkItemsCallCount => Volatile.Read(ref this.getWorkItemsCallCount);
+
+        public int GetTaskHubHostsCallCount => Volatile.Read(ref this.getTaskHubHostsCallCount);
 
         public override TResponse BlockingUnaryCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request)
         {
@@ -1054,6 +1161,15 @@ public class GrpcDurableTaskWorkerTests
             if (method.FullName == "/TaskHubSidecarService/Hello")
             {
                 AsyncUnaryCall<Empty> call = this.helloFactory(Interlocked.Increment(ref this.helloCallCount), options);
+                return (AsyncUnaryCall<TResponse>)(object)call;
+            }
+
+            if (method.FullName == "/TaskHubSidecarService/GetTaskHubHosts"
+                && this.getTaskHubHostsFactory is not null)
+            {
+                AsyncUnaryCall<P.HealthPing> call = this.getTaskHubHostsFactory(
+                    Interlocked.Increment(ref this.getTaskHubHostsCallCount),
+                    options);
                 return (AsyncUnaryCall<TResponse>)(object)call;
             }
 

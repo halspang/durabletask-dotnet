@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using Microsoft.DurableTask.Worker.Grpc.Internal;
+using P = Microsoft.DurableTask.Protobuf;
 
 namespace Microsoft.DurableTask.Worker.Grpc.Tests;
 
@@ -28,7 +29,8 @@ public class GrpcDurableTaskWorkerOptionsInternalTests
         internalOptions.ChannelRecreator.Should().BeNull();
         internalOptions.TaskHubName.Should().BeNull();
         internalOptions.AdditionalChannelFactory.Should().BeNull();
-        internalOptions.FanOutConnectionTimeout.Should().Be(TimeSpan.FromSeconds(30));
+        internalOptions.FanOutConnectionTimeout.Should().Be(TimeSpan.FromSeconds(120));
+        internalOptions.FanOutDiscoveryTimeout.Should().Be(TimeSpan.FromSeconds(10));
         internalOptions.FanOutRetryDelay.Should().Be(TimeSpan.FromSeconds(1));
     }
 
@@ -74,7 +76,7 @@ public class GrpcDurableTaskWorkerOptionsInternalTests
         // Arrange
         GrpcDurableTaskWorkerOptions options = new();
         using GrpcChannel channel = GrpcChannel.ForAddress("http://localhost");
-        Func<GrpcChannel> channelFactory = () => channel;
+        Func<string, GrpcChannel> channelFactory = _ => channel;
 
         // Act
         options.ConfigureConnectionFanOut("test-hub", channelFactory);
@@ -82,5 +84,7 @@ public class GrpcDurableTaskWorkerOptionsInternalTests
         // Assert
         options.Internal.TaskHubName.Should().Be("test-hub");
         options.Internal.AdditionalChannelFactory.Should().BeSameAs(channelFactory);
+        options.Capabilities.Should().Contain(P.WorkerCapability.FanOut);
+        ((int)P.WorkerCapability.FanOut).Should().Be(4);
     }
 }

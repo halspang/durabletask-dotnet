@@ -178,16 +178,22 @@ public sealed class GrpcDurableTaskWorkerOptions : DurableTaskWorkerOptions
         public string? TaskHubName { get; set; }
 
         /// <summary>
-        /// Gets or sets a factory for fresh channels used to probe additional scheduler hosts.
-        /// Each invocation must return a new, independently owned channel.
+        /// Gets or sets a factory for fresh channels targeted to additional scheduler hosts.
+        /// The input is the host's affinity ID. Each invocation must return a new, independently owned channel.
         /// </summary>
-        public Func<GrpcChannel>? AdditionalChannelFactory { get; set; }
+        public Func<string, GrpcChannel>? AdditionalChannelFactory { get; set; }
 
         /// <summary>
         /// Gets or sets the maximum time to wait for a new connection to identify its scheduler host.
-        /// Defaults to 30 seconds.
+        /// Defaults to 120 seconds.
         /// </summary>
         public TimeSpan FanOutConnectionTimeout { get; set; } = TimeSpan.FromSeconds(120);
+
+        /// <summary>
+        /// Gets or sets the timeout for optional direct scheduler host discovery.
+        /// Defaults to 10 seconds. A non-positive value skips direct discovery and uses health pings.
+        /// </summary>
+        public TimeSpan FanOutDiscoveryTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
         /// <summary>
         /// Gets or sets the delay between unsuccessful scheduler host probes. Defaults to 1 second.

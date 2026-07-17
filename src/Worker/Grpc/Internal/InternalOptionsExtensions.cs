@@ -1,7 +1,8 @@
-﻿// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
 using System;
+using P = Microsoft.DurableTask.Protobuf;
 
 namespace Microsoft.DurableTask.Worker.Grpc.Internal;
 
@@ -122,7 +123,7 @@ public static class InternalOptionsExtensions
     /// <param name="options">The gRPC worker options.</param>
     /// <param name="taskHubName">The task hub name used to select advertised scheduler hosts.</param>
     /// <param name="channelFactory">
-    /// Factory that creates a fresh, independently owned channel for each connection attempt.
+    /// Factory that creates a fresh, independently owned channel for each scheduler host affinity ID.
     /// </param>
     /// <remarks>
     /// This is an internal API that supports the DurableTask infrastructure and not subject to
@@ -132,7 +133,7 @@ public static class InternalOptionsExtensions
     public static void ConfigureConnectionFanOut(
         this GrpcDurableTaskWorkerOptions options,
         string taskHubName,
-        Func<GrpcChannel> channelFactory)
+        Func<string, GrpcChannel> channelFactory)
     {
         if (string.IsNullOrWhiteSpace(taskHubName))
         {
@@ -142,5 +143,36 @@ public static class InternalOptionsExtensions
         options.Internal.TaskHubName = taskHubName;
         options.Internal.AdditionalChannelFactory =
             channelFactory ?? throw new ArgumentNullException(nameof(channelFactory));
+        options.Capabilities.Add(P.WorkerCapability.FanOut);
+    }
+
+    /// <summary>
+    /// Configures the worker to open additional untargeted connections for scheduler hosts advertised for a task hub.
+    /// </summary>
+    /// <param name="options">The gRPC worker options.</param>
+    /// <param name="taskHubName">The task hub name used to select advertised scheduler hosts.</param>
+    /// <param name="channelFactory">
+    /// Factory that creates a fresh, independently owned channel for each connection attempt.
+    /// </param>
+    /// <remarks>
+    /// This overload is retained for compatibility. Prefer
+    /// <see cref="ConfigureConnectionFanOut(GrpcDurableTaskWorkerOptions, string, Func{string, GrpcChannel})"/>
+    /// so each channel can target its advertised scheduler host.
+    /// </remarks>
+    public static void ConfigureConnectionFanOut(
+        this GrpcDurableTaskWorkerOptions options,
+        string taskHubName,
+        Func<GrpcChannel> channelFactory)
+    {
+#if NET6_0_OR_GREATER
+        ArgumentNullException.ThrowIfNull(channelFactory);
+#else
+        if (channelFactory is null)
+        {
+            throw new ArgumentNullException(nameof(channelFactory));
+        }
+#endif
+
+        options.ConfigureConnectionFanOut(taskHubName, _ => channelFactory());
     }
 }

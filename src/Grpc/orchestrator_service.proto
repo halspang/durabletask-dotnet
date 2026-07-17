@@ -747,6 +747,10 @@ service TaskHubSidecarService {
     // Sends a hello request to the sidecar service.
     rpc Hello(google.protobuf.Empty) returns (google.protobuf.Empty);
 
+    // Gets the current scheduler host topology for worker connection fan-out.
+    // Older backends may return UNIMPLEMENTED; capable workers continue using health pings.
+    rpc GetTaskHubHosts(google.protobuf.Empty) returns (HealthPing);
+
     // Starts a new orchestration instance.
     rpc StartInstance(CreateInstanceRequest) returns (CreateInstanceResponse);
 
@@ -852,6 +856,10 @@ enum WorkerCapability {
     // Work items may contain URI references instead of inline data, and the worker must fetch them.
     // This avoids message size limits and reduces network overhead.
     WORKER_CAPABILITY_LARGE_PAYLOADS = 3;
+
+    // Indicates that the worker can establish one work-item stream per scheduler host
+    // advertised for its task hub.
+    WORKER_CAPABILITY_FAN_OUT = 4;
 }
 
 message WorkItemFilters {
@@ -890,12 +898,18 @@ message CompleteTaskResponse {
 }
 
 message HealthPing {
+    // The App Service instance ID of the scheduler host serving this connection.
+    // Fan-out capable workers use this value to verify ARR affinity routing.
     string connectedHost = 1;
+
+    // Current App Service instance IDs that have work for each task hub.
     repeated TaskHubHosts taskHubHosts = 2;
 }
 
 message TaskHubHosts {
     string taskHubName = 1;
+
+    // App Service instance IDs suitable for use as ARRAffinity cookie values.
     repeated string hosts = 2;
 }
 

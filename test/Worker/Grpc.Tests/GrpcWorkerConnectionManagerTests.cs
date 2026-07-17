@@ -12,13 +12,19 @@ public class GrpcWorkerConnectionManagerTests
     static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
 
     [Fact]
-    public async Task MissingHost_DuplicateProbeIsRetriedUntilHostIsConnected()
+    public async Task MissingHost_AffinityMismatchIsRetriedUntilTargetHostIsConnected()
     {
         // Arrange
         FakeWorkerConnection duplicateConnection = new(CreateHealthPing("host-a", "host-a", "host-b"));
         FakeWorkerConnection desiredConnection = new(CreateHealthPing("host-b", "host-a", "host-b"));
         Queue<FakeWorkerConnection> connections = new(new[] { duplicateConnection, desiredConnection });
-        await using GrpcWorkerConnectionManager manager = CreateManager(() => connections.Dequeue());
+        List<string> targets = new();
+        await using GrpcWorkerConnectionManager manager = CreateManager(
+            targetHost =>
+            {
+                targets.Add(targetHost);
+                return connections.Dequeue();
+            });
         manager.Start(CancellationToken.None);
 
         // Act
@@ -33,6 +39,38 @@ public class GrpcWorkerConnectionManagerTests
         await duplicateConnection.Disposed.Task.WaitAsync(TestTimeout);
         duplicateConnection.WorkerCancellation.IsCancellationRequested.Should().BeFalse();
         manager.ConnectedHosts.Should().BeEquivalentTo("host-a", "host-b");
+        targets.Should().Equal("host-b", "host-b");
+    }
+
+    [Fact]
+    public async Task FailedAffinityTarget_DoesNotBlockOtherMissingHosts()
+    {
+        // Arrange
+        FakeWorkerConnection failedHostB =
+            new(CreateHealthPing("host-a", "host-a", "host-b", "host-c"));
+        FakeWorkerConnection hostC =
+            new(CreateHealthPing("host-c", "host-a", "host-b", "host-c"));
+        FakeWorkerConnection hostB =
+            new(CreateHealthPing("host-b", "host-a", "host-b", "host-c"));
+        Queue<FakeWorkerConnection> connections = new(new[] { failedHostB, hostC, hostB });
+        List<string> targets = new();
+        await using GrpcWorkerConnectionManager manager = CreateManager(
+            targetHost =>
+            {
+                targets.Add(targetHost);
+                return connections.Dequeue();
+            });
+        manager.Start(CancellationToken.None);
+
+        // Act
+        manager.ReportPrimaryHealthPing(CreateHealthPing("host-a", "host-a", "host-b", "host-c"));
+        await WaitUntilAsync(
+            () => manager.ConnectedHosts.OrderBy(host => host)
+                .SequenceEqual(new[] { "host-a", "host-b", "host-c" }),
+            TestTimeout);
+
+        // Assert
+        targets.Should().Equal("host-b", "host-c", "host-b");
     }
 
     [Fact]
@@ -40,7 +78,7 @@ public class GrpcWorkerConnectionManagerTests
     {
         // Arrange
         FakeWorkerConnection additionalConnection = new(CreateHealthPing("host-b", "host-a", "host-b"));
-        await using GrpcWorkerConnectionManager manager = CreateManager(() => additionalConnection);
+        await using GrpcWorkerConnectionManager manager = CreateManager(_ => additionalConnection);
         manager.Start(CancellationToken.None);
         manager.ReportPrimaryHealthPing(CreateHealthPing("host-a", "host-a", "host-b"));
         await additionalConnection.Started.Task.WaitAsync(TestTimeout);
@@ -58,12 +96,42 @@ public class GrpcWorkerConnectionManagerTests
     }
 
     [Fact]
+    public async Task AcceptedConnection_LosesAffinity_IsRetiredAndRetargeted()
+    {
+        // Arrange
+        FakeWorkerConnection firstConnection = new(CreateHealthPing("host-b", "host-a", "host-b"));
+        FakeWorkerConnection replacementConnection = new(CreateHealthPing("host-b", "host-a", "host-b"));
+        Queue<FakeWorkerConnection> connections = new(new[] { firstConnection, replacementConnection });
+        List<string> targets = new();
+        await using GrpcWorkerConnectionManager manager = CreateManager(
+            targetHost =>
+            {
+                targets.Add(targetHost);
+                return connections.Dequeue();
+            });
+        manager.Start(CancellationToken.None);
+        manager.ReportPrimaryHealthPing(CreateHealthPing("host-a", "host-a", "host-b"));
+        await WaitUntilAsync(() => manager.ConnectedHosts.Contains("host-b"), TestTimeout);
+
+        // Act
+        firstConnection.ReportHealthPing(CreateHealthPing("host-c", "host-a", "host-b"));
+        await replacementConnection.Started.Task.WaitAsync(TestTimeout);
+        await WaitUntilAsync(
+            () => manager.ConnectedHosts.OrderBy(host => host).SequenceEqual(new[] { "host-a", "host-b" }),
+            TestTimeout);
+
+        // Assert
+        await firstConnection.ConnectionStopped.Task.WaitAsync(TestTimeout);
+        targets.Should().Equal("host-b", "host-b");
+    }
+
+    [Fact]
     public async Task EmptyLegacyHealthPing_DoesNotOpenAdditionalConnection()
     {
         // Arrange
         int connectionFactoryCalls = 0;
         await using GrpcWorkerConnectionManager manager = CreateManager(
-            () =>
+            _ =>
             {
                 Interlocked.Increment(ref connectionFactoryCalls);
                 return new FakeWorkerConnection(null);
@@ -85,7 +153,7 @@ public class GrpcWorkerConnectionManagerTests
         // Arrange
         int connectionFactoryCalls = 0;
         await using GrpcWorkerConnectionManager manager = CreateManager(
-            () =>
+            _ =>
             {
                 Interlocked.Increment(ref connectionFactoryCalls);
                 return new FakeWorkerConnection(null);
@@ -116,7 +184,7 @@ public class GrpcWorkerConnectionManagerTests
     {
         // Arrange
         FakeWorkerConnection additionalConnection = new(CreateHealthPing("host-b", "host-a", "host-b"));
-        GrpcWorkerConnectionManager manager = CreateManager(() => additionalConnection);
+        GrpcWorkerConnectionManager manager = CreateManager(_ => additionalConnection);
         manager.Start(CancellationToken.None);
         manager.ReportPrimaryHealthPing(CreateHealthPing("host-a", "host-a", "host-b"));
         await additionalConnection.Started.Task.WaitAsync(TestTimeout);
@@ -131,7 +199,8 @@ public class GrpcWorkerConnectionManagerTests
         additionalConnection.Disposed.Task.IsCompleted.Should().BeTrue();
     }
 
-    static GrpcWorkerConnectionManager CreateManager(Func<IGrpcWorkerConnection> connectionFactory)
+    static GrpcWorkerConnectionManager CreateManager(
+        Func<string, IGrpcWorkerConnection> connectionFactory)
         => new(
             TaskHubName,
             connectionFactory,
@@ -173,6 +242,7 @@ public class GrpcWorkerConnectionManagerTests
     sealed class FakeWorkerConnection : IGrpcWorkerConnection
     {
         readonly P.HealthPing? healthPing;
+        Action<P.HealthPing>? onHealthPing;
 
         public FakeWorkerConnection(P.HealthPing? healthPing)
         {
@@ -192,6 +262,13 @@ public class GrpcWorkerConnectionManagerTests
 
         public CancellationToken WorkerCancellation { get; private set; }
 
+        public void ReportHealthPing(P.HealthPing healthPing)
+        {
+            Action<P.HealthPing> callback = this.onHealthPing
+                ?? throw new InvalidOperationException("The connection has not started.");
+            callback(healthPing);
+        }
+
         public async Task RunAsync(
             Action<P.HealthPing> onHealthPing,
             CancellationToken connectionCancellation,
@@ -199,6 +276,7 @@ public class GrpcWorkerConnectionManagerTests
         {
             this.ConnectionCancellation = connectionCancellation;
             this.WorkerCancellation = workerCancellation;
+            this.onHealthPing = onHealthPing;
             this.Started.TrySetResult();
             if (this.healthPing is not null)
             {

@@ -31,7 +31,7 @@ internal interface IGrpcWorkerConnection : IAsyncDisposable
 internal sealed class GrpcWorkerConnectionManager : IAsyncDisposable
 {
     readonly string taskHubName;
-    readonly Func<IGrpcWorkerConnection> connectionFactory;
+    readonly Func<string, IGrpcWorkerConnection> connectionFactory;
     readonly ILogger logger;
     readonly TimeSpan probeTimeout;
     readonly TimeSpan retryDelay;
@@ -47,6 +47,7 @@ internal sealed class GrpcWorkerConnectionManager : IAsyncDisposable
     CancellationTokenRegistration workerCancellationRegistration;
     Task? reconcileTask;
     ManagedConnection? activeProbe;
+    string? lastProbedHost;
     string? primaryHost;
     long nextConnectionId;
     int reconcilePending;
@@ -64,7 +65,7 @@ internal sealed class GrpcWorkerConnectionManager : IAsyncDisposable
     /// <param name="deferredDisposeDelay">Grace period before disposing a retired connection.</param>
     public GrpcWorkerConnectionManager(
         string taskHubName,
-        Func<IGrpcWorkerConnection> connectionFactory,
+        Func<string, IGrpcWorkerConnection> connectionFactory,
         ILogger logger,
         TimeSpan probeTimeout,
         TimeSpan retryDelay,
@@ -274,19 +275,21 @@ internal sealed class GrpcWorkerConnectionManager : IAsyncDisposable
 
                 while (!cancellation.IsCancellationRequested)
                 {
-                    List<ManagedConnection> connectionsToRetire = this.GetConnectionsToRetire(out bool hostMissing);
+                    List<ManagedConnection> connectionsToRetire =
+                        this.GetConnectionsToRetire(out string? missingHost);
                     foreach (ManagedConnection connection in connectionsToRetire)
                     {
                         this.logger.FanOutConnectionRetired(connection.Host);
                         connection.Cancel();
                     }
 
-                    if (!hostMissing)
+                    if (missingHost is null)
                     {
                         break;
                     }
 
-                    ProbeResult result = await this.ProbeOnceAsync(cancellation).ConfigureAwait(false);
+                    ProbeResult result =
+                        await this.ProbeOnceAsync(missingHost, cancellation).ConfigureAwait(false);
                     if (result != ProbeResult.Accepted
                         && this.retryDelay > TimeSpan.Zero
                         && this.HasMissingHost())
@@ -305,7 +308,7 @@ internal sealed class GrpcWorkerConnectionManager : IAsyncDisposable
         }
     }
 
-    List<ManagedConnection> GetConnectionsToRetire(out bool hostMissing)
+    List<ManagedConnection> GetConnectionsToRetire(out string? missingHost)
     {
         lock (this.syncRoot)
         {
@@ -329,9 +332,46 @@ internal sealed class GrpcWorkerConnectionManager : IAsyncDisposable
                 this.connections.Remove(connection.Id);
             }
 
-            hostMissing = this.desiredHosts.Any(host => !occupiedHosts.Contains(host));
+            string[] missingHosts = this.desiredHosts
+                .Where(host => !occupiedHosts.Contains(host))
+                .OrderBy(host => host, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            missingHost = this.SelectNextMissingHostLocked(missingHosts);
             return connectionsToRetire;
         }
+    }
+
+    string? SelectNextMissingHostLocked(string[] missingHosts)
+    {
+        if (missingHosts.Length == 0)
+        {
+            return null;
+        }
+
+        int nextIndex = 0;
+        if (this.lastProbedHost is not null)
+        {
+            int previousIndex = Array.FindIndex(
+                missingHosts,
+                host => string.Equals(host, this.lastProbedHost, StringComparison.OrdinalIgnoreCase));
+            if (previousIndex >= 0)
+            {
+                nextIndex = (previousIndex + 1) % missingHosts.Length;
+            }
+            else
+            {
+                int followingIndex = Array.FindIndex(
+                    missingHosts,
+                    host => StringComparer.OrdinalIgnoreCase.Compare(host, this.lastProbedHost) > 0);
+                if (followingIndex >= 0)
+                {
+                    nextIndex = followingIndex;
+                }
+            }
+        }
+
+        this.lastProbedHost = missingHosts[nextIndex];
+        return this.lastProbedHost;
     }
 
     bool HasMissingHost()
@@ -358,14 +398,14 @@ internal sealed class GrpcWorkerConnectionManager : IAsyncDisposable
         return this.desiredHosts.Any(host => !occupiedHosts.Contains(host));
     }
 
-    async Task<ProbeResult> ProbeOnceAsync(CancellationToken cancellation)
+    async Task<ProbeResult> ProbeOnceAsync(string targetHost, CancellationToken cancellation)
     {
-        this.logger.FanOutProbeStarted(this.taskHubName);
+        this.logger.FanOutProbeStarted(this.taskHubName, targetHost);
 
         IGrpcWorkerConnection workerConnection;
         try
         {
-            workerConnection = this.connectionFactory();
+            workerConnection = this.connectionFactory(targetHost);
             if (workerConnection is null)
             {
                 throw new InvalidOperationException("The worker connection factory returned null.");
@@ -381,7 +421,7 @@ internal sealed class GrpcWorkerConnectionManager : IAsyncDisposable
         CancellationTokenSource connectionCancellation =
             CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         ManagedConnection managedConnection =
-            new(connectionId, workerConnection, connectionCancellation);
+            new(connectionId, targetHost, workerConnection, connectionCancellation);
         TaskCompletionSource<P.HealthPing> firstHealthPing =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         int accepted = 0;
@@ -441,11 +481,11 @@ internal sealed class GrpcWorkerConnectionManager : IAsyncDisposable
                 return result;
             }
 
-            this.logger.FanOutConnectionRejected(healthPing.ConnectedHost);
+            this.logger.FanOutConnectionRejected(targetHost, healthPing.ConnectedHost);
         }
         else if (completedTask == timeoutTask && !cancellation.IsCancellationRequested)
         {
-            this.logger.FanOutProbeTimedOut(this.probeTimeout);
+            this.logger.FanOutProbeTimedOut(targetHost, this.probeTimeout);
             result = ProbeResult.TimedOut;
         }
         else
@@ -479,7 +519,9 @@ internal sealed class GrpcWorkerConnectionManager : IAsyncDisposable
             this.UpdateDesiredHostsLocked(healthPing);
             connection.Host = healthPing.ConnectedHost;
 
-            if (!this.desiredHosts.Contains(connection.Host) || this.IsHostConnectedLocked(connection.Host))
+            if (!string.Equals(connection.TargetHost, connection.Host, StringComparison.OrdinalIgnoreCase)
+                || !this.desiredHosts.Contains(connection.TargetHost)
+                || this.IsHostConnectedLocked(connection.Host))
             {
                 return false;
             }
@@ -501,6 +543,7 @@ internal sealed class GrpcWorkerConnectionManager : IAsyncDisposable
             return;
         }
 
+        bool affinityLost;
         lock (this.syncRoot)
         {
             if (!this.connections.ContainsKey(connection.Id))
@@ -510,10 +553,25 @@ internal sealed class GrpcWorkerConnectionManager : IAsyncDisposable
 
             connection.Host = healthPing.ConnectedHost;
             this.UpdateDesiredHostsLocked(healthPing);
+            affinityLost = !string.Equals(
+                connection.TargetHost,
+                connection.Host,
+                StringComparison.OrdinalIgnoreCase);
+            if (affinityLost)
+            {
+                this.connections.Remove(connection.Id);
+            }
+
             this.logger.FanOutTopologyObserved(
                 healthPing.ConnectedHost,
                 this.taskHubName,
                 this.desiredHosts.Count);
+        }
+
+        if (affinityLost)
+        {
+            this.logger.FanOutAffinityLost(connection.TargetHost, connection.Host);
+            connection.Cancel();
         }
 
         this.SignalReconcile();
@@ -649,16 +707,20 @@ internal sealed class GrpcWorkerConnectionManager : IAsyncDisposable
 
         public ManagedConnection(
             long id,
+            string targetHost,
             IGrpcWorkerConnection connection,
             CancellationTokenSource cancellationSource)
         {
             this.Id = id;
+            this.TargetHost = targetHost;
             this.Connection = connection;
             this.CancellationSource = cancellationSource;
             this.Cancellation = cancellationSource.Token;
         }
 
         public long Id { get; }
+
+        public string TargetHost { get; }
 
         public IGrpcWorkerConnection Connection { get; }
 

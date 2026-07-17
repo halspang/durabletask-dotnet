@@ -23,6 +23,7 @@ sealed partial class GrpcDurableTaskWorker : DurableTaskWorker
     readonly ILogger logger;
     readonly IOrchestrationFilter? orchestrationFilter;
     readonly DurableTaskWorkerWorkItemFilters? workItemFilters;
+    int taskHubHostsRpcUnavailable;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="GrpcDurableTaskWorker" /> class.
@@ -86,7 +87,8 @@ sealed partial class GrpcDurableTaskWorker : DurableTaskWorker
                     new(callInvoker),
                     this.orchestrationFilter,
                     this.ExceptionPropertiesProvider,
-                    healthPingHandler);
+                    healthPingHandler,
+                    useDirectTopologyDiscovery: true);
                 ProcessorExitReason reason = await processor.ExecuteAsync(stoppingToken);
 
                 if (reason == ProcessorExitReason.Shutdown || stoppingToken.IsCancellationRequested)
@@ -131,7 +133,7 @@ sealed partial class GrpcDurableTaskWorker : DurableTaskWorker
     GrpcWorkerConnectionManager? CreateConnectionManager()
     {
         GrpcDurableTaskWorkerOptions.InternalOptions options = this.grpcOptions.Internal;
-        Func<GrpcChannel>? channelFactory = options.AdditionalChannelFactory;
+        Func<string, GrpcChannel>? channelFactory = options.AdditionalChannelFactory;
         if (channelFactory is null || string.IsNullOrWhiteSpace(options.TaskHubName))
         {
             return null;
@@ -139,9 +141,9 @@ sealed partial class GrpcDurableTaskWorker : DurableTaskWorker
 
         return new GrpcWorkerConnectionManager(
             options.TaskHubName,
-            () =>
+            affinityId =>
             {
-                GrpcChannel channel = channelFactory()
+                GrpcChannel channel = channelFactory(affinityId)
                     ?? throw new InvalidOperationException("The additional gRPC channel factory returned null.");
                 return new AdditionalGrpcWorkerConnection(this, channel);
             },
@@ -397,7 +399,8 @@ sealed partial class GrpcDurableTaskWorker : DurableTaskWorker
                 new(this.channel.CreateCallInvoker()),
                 this.worker.orchestrationFilter,
                 this.worker.ExceptionPropertiesProvider,
-                onHealthPing);
+                onHealthPing,
+                useDirectTopologyDiscovery: false);
             await processor.ExecuteConnectionAsync(connectionCancellation, workerCancellation);
         }
 
